@@ -19,12 +19,14 @@
 
 Name:           openssl_tpm2_engine
 Version:        2.4.2
-Release:        1
+Release:        2
 Summary:        OpenSSL TPM 2.0 interface engine plugin
 License:        LGPL-2.1-only
 Group:          Productivity/Security
 URL:            https://git.kernel.org/pub/scm/linux/kernel/git/jejb/openssl_tpm2_engine.git/
 Source0:        https://git.kernel.org/pub/scm/linux/kernel/git/jejb/openssl_tpm2_engine.git/snapshot/%{name}-%{version}.tar.gz
+Patch0:         Introduce-env-variables-to-set-owner-and-group-of-TS.patch
+Patch1:         Strip-tpm2-from-the-file-path.patch
 BuildRequires:  autoconf
 BuildRequires:  automake
 BuildRequires:  help2man
@@ -39,7 +41,7 @@ Trusted Platform Module version 2.0 found on newer machines and a
 create_tpm2_key helper binary to create and extract a TPM key.
 
 %prep
-%setup -q
+%autosetup -n %{name}-%{version} -p1
 
 %build
 autoreconf -fiv
@@ -62,6 +64,9 @@ find * -name \*.so -printf "/%p\n" > $CWD/%{EXTRA_FILES}
 %{_mandir}/man1/*
 
 %changelog
+Fri Mar 12 09:30:00 UTC 2021 - Roberto Sassu <roberto.sassu@huawei.com>
+- Add Introduce-env-variable-to-set-owner-and-group-of-TSS.patch
+- Add Strip-tpm2-from-the-file-path.patch
 
 Fri Jul  3 09:35:56 UTC 2020 - Pedro Monreal Gonzalez <pmonrealgonzalez@suse.com>
 - Update tarball due to download_files error

@@ -1,0 +1,180 @@
+From 2944d76994bc3544fc4efc40f57aa5b5480d80c2 Mon Sep 17 00:00:00 2001
+From: Roberto Sassu <roberto.sassu@huawei.com>
+Date: Wed, 3 Mar 2021 14:56:59 +0100
+Subject: [PATCH 1/2] Introduce env variables to set owner and group of TSS dir
+
+Before reading the TPM key, tpm2_set_unique_tssdir() creates a temporary
+working directory for IBM TSS-generated files. By default permissions are
+0700, which means that only the owner is able to access that directory.
+
+Unfortunately there is a case, the Apache web server, where the temporary
+directory is created when the process user is still root, as the process
+must be able to read the TPM key. Then, the process switches to the apache
+user and TPM operations cannot be performed because the apache user cannot
+access the temporary directory. This can be seen in the output of strace:
+
+3030  openat(AT_FDCWD, "/etc/attest-tools/tls_key.pem", O_RDONLY) = 11
+3030  openat(AT_FDCWD, "/etc/attest-tools/tls_key_cert.pem", O_RDONLY) = 11
+...
+3030  setuid(48)                        = 0
+...
+3087  openat(AT_FDCWD, "/dev/tpmrm0", O_RDWR) = 16
+3087  openat(AT_FDCWD, "/run/user/0/tss2.fHbi2k/h81000001.bin",
+            O_WRONLY|O_CREAT|O_TRUNC, 0666) = -1 EACCES (Permission denied)
+3087  openat(AT_FDCWD, "/run/user/0/tss2.fHbi2k/hp81000001.bin",
+            O_RDONLY) = -1 EACCES (Permission denied)
+
+This patch introduces two new environment variables, XDG_RUNTIME_DIR_OWNER
+and XDG_RUNTIME_DIR_GROUP, to explicitly set the owner and the group of the
+temporary directory.
+
+XDG_RUNTIME_DIR should also be set if also the parent directory is not
+accessible (for example, if it is /run/user/0).
+
+Signed-off-by: Roberto Sassu <roberto.sassu@huawei.com>
+---
+ tests/Makefile.am            |  2 +-
+ tests/check_tpm_directory.sh | 45 ++++++++++++++++++++++++++++++++++++
+ tpm2-common.c                | 44 ++++++++++++++++++++++++++++++++++-
+ 3 files changed, 89 insertions(+), 2 deletions(-)
+
+diff --git a/tests/Makefile.am b/tests/Makefile.am
+index 23f2b57..b756aba 100644
+--- a/tests/Makefile.am
++++ b/tests/Makefile.am
+@@ -40,6 +40,6 @@ AM_TESTS_ENVIRONMENT = TPM_INTERFACE_TYPE=socsim; export TPM_INTERFACE_TYPE; \
+ 
+ TEST_EXTENSIONS = .sh
+ 
+-CLEANFILES = key*.tpm key*.pub key*.priv tmp.* NVChip h*.bin key*.der seal.*
++CLEANFILES = key*.tpm key*.pub key*.priv tmp.* NVChip h*.bin key*.der seal.* fifo tss2.*
+ clean-local:
+ 	rm -fr testdir
+diff --git a/tests/check_tpm_directory.sh b/tests/check_tpm_directory.sh
+index bb30a7d..d18c04d 100755
+--- a/tests/check_tpm_directory.sh
++++ b/tests/check_tpm_directory.sh
+@@ -19,4 +19,49 @@ mkdir testdir
+ chmod u-w testdir || exit 1
+ cd testdir || exit 1
+ echo "This is a message" | openssl rsautl -sign -engine tpm2 -engine tpm2 -keyform engine -inkey ../key.tpm -passin pass:passw0rd -out ../tmp.msg
++cd ..
+ 
++##
++# test is
++# 1. obtain current user and group before running fakeroot
++# 2. set XDG_RUNTIME_DIR_ env variables
++# 3. Generate a random key
++# 4. try to wrap the key (in background, suspend until there is data in fifo)
++# 5. wait for tmp.msg to appear (created after lchown()) and check the owner and group
++# 6. write data to fifo
++# 7. evaluate owner and group of tss2. directory
++#
++# note this test fails if the tpm2 engine does not take into account the
++# set XDG_RUNTIME_DIR_ env variables, owner and group would be root
++##
++cur_user=$(id -u -n -r)
++cur_group=$(id -g -n -r)
++
++fakeroot sh -c '
++bindir=${srcdir}/..
++
++printenv|grep dir
++
++export XDG_RUNTIME_DIR=$PWD
++export XDG_RUNTIME_DIR_OWNER='$cur_user'
++export XDG_RUNTIME_DIR_GROUP='$cur_group'
++$bindir/create_tpm2_key -p 81000001 -rsa -a -k passw0rd key.tpm || exit 1
++rm -f fifo
++rm -f tmp.msg
++mkfifo fifo || exit 1
++cat fifo | openssl rsautl -sign -engine tpm2 -engine tpm2 -keyform engine -inkey key.tpm -passin pass:passw0rd -out tmp.msg &
++pid=$!
++while [ ! -f tmp.msg ] && [ -d /proc/$pid ]; do
++    sleep 0.5
++done
++
++[ -d /proc/$pid ] || exit 1
++
++owner=$(ls -ld $XDG_RUNTIME_DIR/tss2.* | awk "{print \$3}")
++group=$(ls -ld $XDG_RUNTIME_DIR/tss2.* | awk "{print \$4}")
++echo "This is a message" > fifo
++wait
++if [ $owner != '$cur_user' ] || [ $group != '$cur_group' ]; then
++    exit 1
++fi'
++ [ $? -eq 0 ] || exit 1
+diff --git a/tpm2-common.c b/tpm2-common.c
+index 37eb8d8..abbf710 100644
+--- a/tpm2-common.c
++++ b/tpm2-common.c
+@@ -9,6 +9,9 @@
+ #include <unistd.h>
+ #include <fcntl.h>
+ #include <ctype.h>
++#include <errno.h>
++#include <pwd.h>
++#include <grp.h>
+ 
+ #include <sys/stat.h>
+ #include <sys/types.h>
+@@ -1165,9 +1168,16 @@ const char *tpm2_curve_name_to_text(TPMI_ECC_CURVE curve)
+ 
+ const char *tpm2_set_unique_tssdir(void)
+ {
++	char *dir_owner = getenv("XDG_RUNTIME_DIR_OWNER");
++	char *dir_group = getenv("XDG_RUNTIME_DIR_GROUP");
+ 	char *prefix = getenv("XDG_RUNTIME_DIR"), *template,
+ 		*dir;
+-	int len = 0;
++	int ret, len = 0;
++	struct stat st;
++	struct passwd *pwd;
++	struct group *grp;
++	uid_t uid;
++	gid_t gid;
+ 
+ 	if (!prefix)
+ 		prefix = "/tmp";
+@@ -1183,6 +1193,38 @@ const char *tpm2_set_unique_tssdir(void)
+ 	len = snprintf(template, len, "%s/tss2.XXXXXX", prefix);
+ 
+ 	dir = mkdtemp(template);
++	if (!dir)
++		goto out;
++
++	if (stat(dir, &st) == -1)
++		goto out;
++
++	uid = st.st_uid;
++	if (dir_owner) {
++		pwd = getpwnam(dir_owner);
++		if (pwd)
++			uid = pwd->pw_uid;
++	}
++
++	gid = st.st_gid;
++	if (dir_group) {
++		grp = getgrnam(dir_group);
++		if (grp)
++			gid = grp->gr_gid;
++	}
++
++	if (geteuid() != 0 && (uid != getuid() || gid != getgid()))
++		goto out;
++
++	if (dir_owner || dir_group) {
++		ret = chown(dir, uid, gid);
++		if (ret == -1) {
++			fprintf(stderr, "chown() failed (%s)", strerror(errno));
++			unlink(dir);
++			dir = NULL;
++		}
++	}
++out:
+ 	return dir;
+ }
+ 
+-- 
+2.26.2
+

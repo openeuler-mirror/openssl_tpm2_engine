@@ -1,0 +1,82 @@
+From 7a0d5b4bb2a51a63486a0d5a74187915427d7e46 Mon Sep 17 00:00:00 2001
+From: Roberto Sassu <roberto.sassu@huawei.com>
+Date: Tue, 16 Mar 2021 20:00:37 +0100
+Subject: [PATCH 2/2] Strip tpm2: from the file path
+
+This patch strips the tpm2: prefix from the file path to follow the
+convention used by the PKCS#11 openssl engine. With this patch and a patch
+for the Apache web server, mod_ssl will be able to use TPM keys created
+by openssl_tpm2_engine, by specifying the following directive:
+
+SSLCertificateKeyFile tpm2:<file path>
+
+The impact of this patch should be limited, as likely existing solutions
+set an absolute path for the key file.
+
+Signed-off-by: Roberto Sassu <roberto.sassu@huawei.com>
+---
+ e_tpm2.c                     |  6 ++++++
+ tests/check_tpm_directory.sh | 19 +++++++++++++++++++
+ 2 files changed, 25 insertions(+)
+
+diff --git a/e_tpm2.c b/e_tpm2.c
+index a18a6bd..1cbd6f8 100644
+--- a/e_tpm2.c
++++ b/e_tpm2.c
+@@ -244,6 +244,9 @@ static EVP_PKEY *tpm2_engine_load_key(ENGINE *e, const char *key_id,
+ 	EVP_PKEY *pkey;
+ 	int ret;
+ 
++	if (!strncmp(key_id, "tpm2:", 5))
++		key_id += 5;
++
+ 	ret = tpm2_engine_load_key_core(e, &pkey, key_id, ui, cb, 0);
+ 	if (ret == 1)
+ 		return pkey;
+@@ -256,6 +259,9 @@ static EVP_PKEY *tpm2_engine_load_pubkey(ENGINE *e, const char *key_id,
+ 	EVP_PKEY *pkey;
+ 	int ret;
+ 
++	if (!strncmp(key_id, "tpm2:", 5))
++		key_id += 5;
++
+ 	ret = tpm2_engine_load_key_core(e, &pkey, key_id, ui, cb, 1);
+ 	if (ret == 1)
+ 		return pkey;
+diff --git a/tests/check_tpm_directory.sh b/tests/check_tpm_directory.sh
+index d18c04d..2fd060b 100755
+--- a/tests/check_tpm_directory.sh
++++ b/tests/check_tpm_directory.sh
+@@ -20,6 +20,7 @@ chmod u-w testdir || exit 1
+ cd testdir || exit 1
+ echo "This is a message" | openssl rsautl -sign -engine tpm2 -engine tpm2 -keyform engine -inkey ../key.tpm -passin pass:passw0rd -out ../tmp.msg
+ cd ..
++rm -Rf testdir
+ 
+ ##
+ # test is
+@@ -65,3 +66,21 @@ if [ $owner != '$cur_user' ] || [ $group != '$cur_group' ]; then
+     exit 1
+ fi'
+  [ $? -eq 0 ] || exit 1
++
++##
++# test is
++# 1. Generate a random key
++# 2. create a read only directory and change to it
++# 3. try to wrap the key (use tpm2: prefix for the key)
++#
++# note this test fails if the engine tries to write the TSS files to
++# the current directory, so it's testing that we've correctly set
++# TPM_DATA_DIR
++##
++$bindir/create_tpm2_key -p 81000001 -rsa -a -k passw0rd key.tpm || exit 1
++mkdir testdir
++chmod u-w testdir || exit 1
++cd testdir || exit 1
++echo "This is a message" | openssl rsautl -sign -engine tpm2 -engine tpm2 -keyform engine -inkey tpm2:../key.tpm -passin pass:passw0rd -out ../tmp.msg
++cd ..
++rm -Rf testdir
+-- 
+2.26.2
+
