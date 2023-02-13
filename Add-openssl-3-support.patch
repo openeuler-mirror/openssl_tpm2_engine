@@ -1,0 +1,59 @@
+From 1130ef5b93a68f42c32de8081f1e8b28cc4f632e Mon Sep 17 00:00:00 2001
+From: James Bottomley <James.Bottomley@HansenPartnership.com>
+Date: Tue, 15 Feb 2022 08:26:11 -0500
+Subject: [PATCH] Add openssl-3 support
+
+This is just a bandaid at the moment to prevent -Werror from breaking
+the compile on deprecated API warnings.  Since the APIs will be
+removed in the next release, this buys some time.  The final solution
+will likely have to be a conversion to the new provider interface.
+
+Signed-off-by: James Bottomley <James.Bottomley@HansenPartnership.com>
+---
+ Makefile.am  | 4 ++++
+ configure.ac | 7 +++++++
+ 2 files changed, 11 insertions(+)
+
+diff --git a/Makefile.am b/Makefile.am
+index 33de0d95662..fa9079a0849 100644
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -9,6 +9,10 @@ man1_MANS = create_tpm2_key.1 load_tpm2_key.1 seal_tpm2_data.1 \
+ CLEANFILES = $(man1_MANS)
+ endif
+ 
++if HAVE_OPENSSL3
++CFLAGS+= -DOPENSSL_API_COMPAT=0x10100000L
++endif
++
+ openssl_engine_LTLIBRARIES=libtpm2.la
+ bin_PROGRAMS=create_tpm2_key load_tpm2_key seal_tpm2_data unseal_tpm2_data
+ openssl_enginedir=@enginesdir@
+diff --git a/configure.ac b/configure.ac
+index 9ca4b4adb38..07edc8da52e 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -55,6 +55,11 @@ AC_ARG_WITH(openssl,
+ 	 AC_SUBST(OPENSSL_INCLUDE_DIR)])
+ 
+ AC_LANG(C)
++
++PKG_CHECK_MODULES([DEPS], [libcrypto >= 3.0.0],
++                  [ac_have_openssl3=1],
++		  [PKG_CHECK_MODULES([DEPS], [libcrypto])])
++
+ AC_ARG_WITH(
+ 	[enginesdir],
+ 	[AC_HELP_STRING([--with-enginesdir], [OpenSSL engines directory])],
+@@ -90,6 +95,8 @@ AC_SEARCH_LIBS([TSS_Create], [tss ibmtss], [], [
+ 	AC_MSG_ERROR([Unable to find the TSS2 library])
+ ])
+ 
++AM_CONDITIONAL(HAVE_OPENSSL3, test "$ac_have_openssl3" = "1")
++
+ AC_DISABLE_STATIC
+ AC_PROG_CC_STDC
+ AM_PROG_CC_C_O
+-- 
+2.25.1
+
